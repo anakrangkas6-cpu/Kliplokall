@@ -1,0 +1,6 @@
+{
+  "name": "KlipLokal",
+  "description": "Aplikasi video pendek offline bergaya TikTok dengan sumber folder pribadi, efek visual real-time, profil kustom, suka, dan komentar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

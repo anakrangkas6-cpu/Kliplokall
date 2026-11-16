@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#09090b" />
+  <rect x="28" y="28" width="456" height="456" rx="92" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="4" />
+  <!-- Cyan offset play triangle -->
+  <path d="M188 144 L364 246 L188 348 Z" fill="#25F4EE" opacity="0.92" />
+  <!-- Rose offset play triangle -->
+  <path d="M204 164 L380 266 L204 368 Z" fill="#FE2C55" opacity="0.92" />
+  <!-- Crisp white core play triangle -->
+  <path d="M196 154 L372 256 L196 358 Z" fill="#FFFFFF" />
+</svg>
