@@ -29,6 +29,8 @@ interface VideoSlideProps {
   video: VideoItem;
   isActive: boolean;
   isMuted: boolean;
+  shouldAutoAdvance?: boolean;
+  onVideoEnded?: () => void;
   onToggleMute: () => void;
   onToggleLike: (videoId: string, forceLike?: boolean) => void;
   onToggleBookmark: (videoId: string) => void;
@@ -42,6 +44,8 @@ export function VideoSlide({
   video,
   isActive,
   isMuted,
+  shouldAutoAdvance = false,
+  onVideoEnded,
   onToggleMute,
   onToggleLike,
   onToggleBookmark,
@@ -72,6 +76,7 @@ export function VideoSlide({
 
   const isImagePost = video.mediaType === 'image' || video.mimeType?.startsWith('image/');
   const hasRetriedRef = useRef(false);
+  const autoEndedFiredRef = useRef(false);
   const activeMediaUrlRef = useRef<string | null>(null);
 
   const inferPlayableVideoMime = () => {
@@ -128,6 +133,7 @@ export function VideoSlide({
 
   // Reset userPaused and free decoder when slide becomes inactive
   useEffect(() => {
+    autoEndedFiredRef.current = false;
     if (!isActive) {
       setUserPaused(false);
       setIsPlaying(false);
@@ -203,16 +209,37 @@ export function VideoSlide({
 
   // Virtual timer loop for image posts & starter clips
   useEffect(() => {
-    if ((mediaSrc && !isImagePost) || !isActive || !isPlaying || isScrubbing) return;
+    if ((mediaSrc && !isImagePost && !playbackError) || !isActive || !isPlaying || isScrubbing) return;
     const rate = video.effectConfig.playbackRate || 1;
     const interval = window.setInterval(() => {
       setCurrentTime((prev) => {
         const next = prev + 0.1 * rate;
-        return next >= duration ? 0 : next;
+        if (next >= duration) {
+          if (shouldAutoAdvance && !autoEndedFiredRef.current) {
+            autoEndedFiredRef.current = true;
+            window.setTimeout(() => {
+              onVideoEnded?.();
+            }, 40);
+            return duration;
+          }
+          return 0;
+        }
+        return next;
       });
     }, 100);
     return () => window.clearInterval(interval);
-  }, [mediaSrc, isImagePost, isActive, isPlaying, isScrubbing, duration, video.effectConfig.playbackRate]);
+  }, [
+    mediaSrc,
+    isImagePost,
+    playbackError,
+    isActive,
+    isPlaying,
+    isScrubbing,
+    duration,
+    video.effectConfig.playbackRate,
+    shouldAutoAdvance,
+    onVideoEnded,
+  ]);
 
   const flashCenterIcon = (state: 'play' | 'pause') => {
     setShowCenterFeedback(state);
@@ -329,10 +356,15 @@ export function VideoSlide({
             ref={videoRef}
             src={mediaSrc}
             poster={video.posterUrl}
-            loop
+            loop={!shouldAutoAdvance}
             playsInline
             autoPlay
             preload="auto"
+            onEnded={() => {
+              if (shouldAutoAdvance && !isScrubbing) {
+                onVideoEnded?.();
+              }
+            }}
             onLoadedMetadata={(e) => {
               setPlaybackError(false);
               setPlaybackErrorDetail(null);

@@ -49,6 +49,7 @@ export interface VideoItem {
   creatorName: string;
   creatorUsername: string;
   creatorAvatar: string;
+  creatorFriendId?: string;
   isOwnUpload: boolean;
   isFollowingCreator: boolean;
   sourceType: VideoSourceType;
@@ -80,6 +81,22 @@ export interface UserProfile {
   avatarUrl: string;
   followersCount: number;
   followingCount: number;
+}
+
+export interface FakeFriend {
+  id: string;
+  displayName: string;
+  username: string;
+  bio: string;
+  avatarUrl: string;
+  followersCount: number;
+  followingCount: number;
+}
+
+export interface AppSettings {
+  autoScrollEnabled: boolean;
+  activeIdentityFriendId: string | null;
+  lastBackupAt?: number;
 }
 
 export interface FolderConnection {

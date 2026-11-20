@@ -10,23 +10,28 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Settings,
   Smartphone,
   Sparkles,
   User,
   Users,
 } from 'lucide-react';
 import { CommentsPanel } from './components/CommentsPanel';
+import { CreatorProfileModal } from './components/CreatorProfileModal';
 import { EditProfileModal } from './components/EditProfileModal';
 import { EffectsEditorPanel } from './components/EffectsEditorPanel';
 import { ExploreView } from './components/ExploreView';
 import { FolderSyncView } from './components/FolderSyncModal';
 import { InstallAppModal } from './components/InstallAppModal';
 import { ProfileView } from './components/ProfileView';
+import { SettingsModal } from './components/SettingsModal';
 import { UploadVideoModal } from './components/UploadVideoModal';
 import { VideoSlide } from './components/VideoSlide';
 import { DEFAULT_EFFECT_CONFIG } from './constants/effects';
 import type {
+  AppSettings,
   AppTab,
+  FakeFriend,
   FeedFilter,
   FilterId,
   FolderConnection,
@@ -35,21 +40,32 @@ import type {
   VideoEffectConfig,
   VideoItem,
 } from './types';
+import type { ParsedBackup } from './utils/backup';
 import {
+  clearAllStoredVideos,
   clearDirectoryHandle,
   clearVideosByFolderName,
   deleteStoredVideo,
   getAllStoredVideos,
+  getAppSettings,
   getDirectoryHandle,
+  getFakeFriends,
   getFolderConnections,
   getStoredProfile,
+  saveAppSettings,
   saveDirectoryHandle,
+  saveFakeFriends,
   saveFolderConnections,
   saveStoredProfile,
   saveStoredVideo,
   saveVideosBatch,
 } from './utils/db';
-import { DEFAULT_USER_PROFILE } from './utils/starterData';
+import {
+  createStarterVideos,
+  DEFAULT_APP_SETTINGS,
+  DEFAULT_FAKE_FRIENDS,
+  DEFAULT_USER_PROFILE,
+} from './utils/starterData';
 import { cleanFileTitle, extractVideoMetadata, isVideoFile } from './utils/videoHelpers';
 
 const LAST_FIRST_VIDEO_KEY = 'klip_lokal_last_first_video';
@@ -70,6 +86,8 @@ function buildShuffledFeedIds(items: VideoItem[], avoidFirstId?: string | null):
 export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [profile, setProfile] = useState<UserProfile>(DEFAULT_USER_PROFILE);
+  const [fakeFriends, setFakeFriends] = useState<FakeFriend[]>(DEFAULT_FAKE_FRIENDS);
+  const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [videos, setVideos] = useState<VideoItem[]>([]);
   const [feedOrderIds, setFeedOrderIds] = useState<string[]>([]);
   const [isRefreshingFeed, setIsRefreshingFeed] = useState(false);
@@ -90,6 +108,8 @@ export default function App() {
   const [isFolderModalOpen, setIsFolderModalOpen] = useState(false);
   const [isEditProfileOpen, setIsEditProfileOpen] = useState(false);
   const [isInstallOpen, setIsInstallOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [viewingCreator, setViewingCreator] = useState<FakeFriend | null>(null);
 
   const feedContainerRef = useRef<HTMLDivElement | null>(null);
   const slideRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -99,13 +119,17 @@ export default function App() {
     let cancelled = false;
     async function init() {
       try {
-        const [storedProfile, storedVideos, storedFolders] = await Promise.all([
+        const [storedProfile, storedFriends, storedSettings, storedFolders] = await Promise.all([
           getStoredProfile(),
-          getAllStoredVideos(),
+          getFakeFriends(),
+          getAppSettings(),
           getFolderConnections(),
         ]);
+        const storedVideos = await getAllStoredVideos(storedFriends);
         if (cancelled) return;
         setProfile(storedProfile);
+        setFakeFriends(storedFriends);
+        setAppSettings(storedSettings);
         setVideos(storedVideos);
         setFolderConnections(storedFolders);
 
@@ -125,6 +149,26 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  const activeFakeFriend = useMemo(
+    () => fakeFriends.find((f) => f.id === appSettings.activeIdentityFriendId) ?? null,
+    [fakeFriends, appSettings.activeIdentityFriendId]
+  );
+
+  const activeActorProfile: UserProfile = useMemo(
+    () =>
+      activeFakeFriend
+        ? {
+            displayName: activeFakeFriend.displayName,
+            username: activeFakeFriend.username,
+            bio: activeFakeFriend.bio,
+            avatarUrl: activeFakeFriend.avatarUrl,
+            followersCount: activeFakeFriend.followersCount,
+            followingCount: activeFakeFriend.followingCount,
+          }
+        : profile,
+    [activeFakeFriend, profile]
+  );
 
   const folderVideos = useMemo(
     () => videos.filter((v) => v.sourceType === 'folder' || v.sourceType === 'upload'),
@@ -228,7 +272,16 @@ export default function App() {
   // Keyboard ArrowUp / ArrowDown navigation on Home feed
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (activeTab !== 'home' || isUploadOpen || isFolderModalOpen || isEditProfileOpen) return;
+      if (
+        activeTab !== 'home' ||
+        isUploadOpen ||
+        isFolderModalOpen ||
+        isEditProfileOpen ||
+        isSettingsOpen ||
+        viewingCreator
+      ) {
+        return;
+      }
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
@@ -242,7 +295,22 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [activeTab, activeIndex, scrollToVideoIndex, isUploadOpen, isFolderModalOpen, isEditProfileOpen]);
+  }, [
+    activeTab,
+    activeIndex,
+    scrollToVideoIndex,
+    isUploadOpen,
+    isFolderModalOpen,
+    isEditProfileOpen,
+    isSettingsOpen,
+    viewingCreator,
+  ]);
+
+  const handleAutoScrollNext = useCallback(() => {
+    if (!appSettings.autoScrollEnabled || feedVideos.length <= 1) return;
+    const nextIdx = activeIndex + 1 < feedVideos.length ? activeIndex + 1 : 0;
+    scrollToVideoIndex(nextIdx);
+  }, [appSettings.autoScrollEnabled, feedVideos.length, activeIndex, scrollToVideoIndex]);
 
   const handleRefreshFeed = useCallback(() => {
     if (videos.length === 0) return;
@@ -348,14 +416,14 @@ export default function App() {
     );
   }, []);
 
-  // Comment Handlers
+  // Comment Handlers (posts as active identity: main user OR chosen fake friend)
   const handleAddComment = useCallback(
     (videoId: string, text: string, replyTo?: string) => {
       const newComment: VideoComment = {
         id: `cmt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        authorName: profile.displayName,
-        authorUsername: profile.username,
-        authorAvatar: profile.avatarUrl,
+        authorName: activeActorProfile.displayName,
+        authorUsername: activeActorProfile.username,
+        authorAvatar: activeActorProfile.avatarUrl,
         text,
         createdAt: Date.now(),
         likesCount: 0,
@@ -374,7 +442,7 @@ export default function App() {
         })
       );
     },
-    [profile]
+    [activeActorProfile]
   );
 
   const handleToggleCommentLike = useCallback((videoId: string, commentId: string) => {
@@ -431,13 +499,151 @@ export default function App() {
     await saveVideosBatch(updatedVideos.filter((v) => v.isOwnUpload));
   };
 
+  // Settings, Fake Friends & Backup Handlers
+  const handleUpdateAppSettings = async (next: AppSettings) => {
+    setAppSettings(next);
+    await saveAppSettings(next);
+  };
+
+  const handleUpdateFakeFriend = async (updatedFriend: FakeFriend) => {
+    const prevFriend = fakeFriends.find((f) => f.id === updatedFriend.id);
+    const prevUsernameLower = prevFriend?.username.toLowerCase();
+
+    const nextFriends = fakeFriends.map((f) => (f.id === updatedFriend.id ? updatedFriend : f));
+    setFakeFriends(nextFriends);
+    await saveFakeFriends(nextFriends);
+
+    const changedVideos: VideoItem[] = [];
+    const nextVideos = videos.map((v) => {
+      const matchesCreator =
+        v.creatorFriendId === updatedFriend.id ||
+        (prevUsernameLower && v.creatorUsername.toLowerCase() === prevUsernameLower);
+
+      let commentsChanged = false;
+      const nextComments = v.comments.map((c) => {
+        if (prevUsernameLower && c.authorUsername.toLowerCase() === prevUsernameLower) {
+          commentsChanged = true;
+          return {
+            ...c,
+            authorName: updatedFriend.displayName,
+            authorUsername: updatedFriend.username,
+            authorAvatar: updatedFriend.avatarUrl,
+          };
+        }
+        return c;
+      });
+
+      if (!matchesCreator && !commentsChanged) return v;
+
+      const updatedVideo: VideoItem = {
+        ...v,
+        ...(matchesCreator
+          ? {
+              creatorName: updatedFriend.displayName,
+              creatorUsername: updatedFriend.username,
+              creatorAvatar: updatedFriend.avatarUrl,
+              creatorFriendId: updatedFriend.id,
+            }
+          : {}),
+        comments: nextComments,
+      };
+      changedVideos.push(updatedVideo);
+      return updatedVideo;
+    });
+
+    if (changedVideos.length > 0) {
+      setVideos(nextVideos);
+      await saveVideosBatch(changedVideos);
+    }
+  };
+
+  const handleReseedFriendStarters = async (): Promise<number> => {
+    const starters = createStarterVideos(fakeFriends);
+    const existingIds = new Set(videos.map((v) => v.id));
+    const missing = starters.filter((s) => !existingIds.has(s.id));
+    if (missing.length > 0) {
+      await saveVideosBatch(missing);
+      setVideos((prev) => [...missing, ...prev].sort((a, b) => b.createdAt - a.createdAt));
+      setFeedOrderIds((prev) => [...missing.map((m) => m.id), ...prev]);
+    }
+    return missing.length;
+  };
+
+  const handleRestoreBackup = async (parsed: ParsedBackup, mode: 'merge' | 'replace') => {
+    if (mode === 'replace') {
+      await clearAllStoredVideos();
+      await saveVideosBatch(parsed.videos);
+      await saveStoredProfile(parsed.profile);
+      setProfile(parsed.profile);
+
+      const nextFriends = parsed.fakeFriends.length > 0 ? parsed.fakeFriends : fakeFriends;
+      await saveFakeFriends(nextFriends);
+      setFakeFriends(nextFriends);
+
+      await saveFolderConnections(parsed.folderConnections);
+      setFolderConnections(parsed.folderConnections);
+
+      const nextSettings = parsed.appSettings || appSettings;
+      await saveAppSettings(nextSettings);
+      setAppSettings(nextSettings);
+
+      const sorted = [...parsed.videos].sort((a, b) => b.createdAt - a.createdAt);
+      setVideos(sorted);
+      const shuffled = buildShuffledFeedIds(sorted);
+      setFeedOrderIds(shuffled);
+      if (shuffled.length > 0) setActiveVideoId(shuffled[0]);
+    } else {
+      const existingIds = new Set(videos.map((v) => v.id));
+      const newVideos = parsed.videos.filter((v) => !existingIds.has(v.id));
+      if (newVideos.length > 0) {
+        await saveVideosBatch(newVideos);
+      }
+
+      const mergedVideos = [...newVideos, ...videos].sort((a, b) => b.createdAt - a.createdAt);
+      setVideos(mergedVideos);
+      if (newVideos.length > 0) {
+        setFeedOrderIds((prev) => [...newVideos.map((v) => v.id), ...prev]);
+      }
+
+      const mergedFoldersMap = new Map<string, FolderConnection>();
+      for (const f of folderConnections) mergedFoldersMap.set(f.folderName, f);
+      for (const f of parsed.folderConnections) {
+        if (!mergedFoldersMap.has(f.folderName)) mergedFoldersMap.set(f.folderName, f);
+      }
+      const mergedFolders = Array.from(mergedFoldersMap.values());
+      await saveFolderConnections(mergedFolders);
+      setFolderConnections(mergedFolders);
+
+      if (parsed.fakeFriends.length > 0) {
+        const friendMap = new Map(fakeFriends.map((f) => [f.id, f]));
+        for (const f of parsed.fakeFriends) {
+          if (!friendMap.has(f.id)) friendMap.set(f.id, f);
+        }
+        const mergedFriends = Array.from(friendMap.values());
+        await saveFakeFriends(mergedFriends);
+        setFakeFriends(mergedFriends);
+      }
+    }
+  };
+
   // Publish New Video with Effects into its dedicated folder (never deletes old videos)
   const handlePublishVideo = async (newVideo: VideoItem) => {
-    await saveStoredVideo(newVideo);
-    const targetFolder = newVideo.folderName || 'Koleksi Pribadi';
+    const enrichedVideo: VideoItem = activeFakeFriend
+      ? {
+          ...newVideo,
+          creatorName: activeFakeFriend.displayName,
+          creatorUsername: activeFakeFriend.username,
+          creatorAvatar: activeFakeFriend.avatarUrl,
+          creatorFriendId: activeFakeFriend.id,
+          isOwnUpload: false,
+        }
+      : newVideo;
 
-    setVideos((prev) => [newVideo, ...prev]);
-    setFeedOrderIds((prev) => [newVideo.id, ...prev.filter((id) => id !== newVideo.id)]);
+    await saveStoredVideo(enrichedVideo);
+    const targetFolder = enrichedVideo.folderName || 'Koleksi Pribadi';
+
+    setVideos((prev) => [enrichedVideo, ...prev]);
+    setFeedOrderIds((prev) => [enrichedVideo.id, ...prev.filter((id) => id !== enrichedVideo.id)]);
 
     setFolderConnections((prev) => {
       const existing = prev.find((f) => f.folderName === targetFolder);
@@ -448,7 +654,7 @@ export default function App() {
                   ...f,
                   lastSyncedAt: Date.now(),
                   fileCount: f.fileCount + 1,
-                  totalBytes: f.totalBytes + (newVideo.fileSize || 0),
+                  totalBytes: f.totalBytes + (enrichedVideo.fileSize || 0),
                 }
               : f
           )
@@ -457,7 +663,7 @@ export default function App() {
               folderName: targetFolder,
               lastSyncedAt: Date.now(),
               fileCount: 1,
-              totalBytes: newVideo.fileSize || 0,
+              totalBytes: enrichedVideo.fileSize || 0,
             },
             ...prev,
           ];
@@ -467,8 +673,11 @@ export default function App() {
 
     setFeedFilter('foryou');
     setActiveTab('home');
-    setActiveVideoId(newVideo.id);
-    if (newVideo.audioBlob || (newVideo.audioPresetId && newVideo.audioPresetId !== 'none')) {
+    setActiveVideoId(enrichedVideo.id);
+    if (
+      enrichedVideo.audioBlob ||
+      (enrichedVideo.audioPresetId && enrichedVideo.audioPresetId !== 'none')
+    ) {
       setIsMuted(false);
     }
     window.setTimeout(() => {
@@ -512,9 +721,20 @@ export default function App() {
       videos.map((v) => `${v.folderName || ''}::${v.fileName}::${v.fileSize}`)
     );
 
-    const newOnes = imported.filter(
+    const rawNewOnes = imported.filter(
       (v) => !existingKeys.has(`${v.folderName || ''}::${v.fileName}::${v.fileSize}`)
     );
+
+    const newOnes: VideoItem[] = activeFakeFriend
+      ? rawNewOnes.map((v) => ({
+          ...v,
+          creatorName: activeFakeFriend.displayName,
+          creatorUsername: activeFakeFriend.username,
+          creatorAvatar: activeFakeFriend.avatarUrl,
+          creatorFriendId: activeFakeFriend.id,
+          isOwnUpload: false,
+        }))
+      : rawNewOnes;
 
     if (newOnes.length > 0) {
       await saveVideosBatch(newOnes);
@@ -819,12 +1039,12 @@ export default function App() {
           </div>
         )}
 
-        {/* Bottom Profile Quick Switch */}
-        <div className="mt-auto pt-4 border-t border-white/10">
+        {/* Bottom Profile Quick Switch & Discreet Settings Icon */}
+        <div className="mt-auto pt-4 border-t border-white/10 flex items-center gap-1.5">
           <button
             type="button"
             onClick={() => setActiveTab('profile')}
-            className="flex w-full items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-white/[0.06]"
+            className="flex min-w-0 flex-1 items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-white/[0.06]"
           >
             <img
               src={profile.avatarUrl}
@@ -836,6 +1056,15 @@ export default function App() {
               <div className="truncate text-xs font-bold text-white">{profile.displayName}</div>
               <div className="truncate text-[11px] text-zinc-400">@{profile.username}</div>
             </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsSettingsOpen(true)}
+            aria-label="Pengaturan"
+            title="Pengaturan"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-zinc-400 transition-colors hover:bg-white/10 hover:text-white"
+          >
+            <Settings className="h-4 w-4" />
           </button>
         </div>
       </aside>
@@ -978,6 +1207,17 @@ export default function App() {
                           video={video}
                           isActive={activeVideo?.id === video.id}
                           isMuted={isMuted}
+                          shouldAutoAdvance={
+                            appSettings.autoScrollEnabled &&
+                            feedVideos.length > 1 &&
+                            mobileSheet === 'none' &&
+                            !isSettingsOpen &&
+                            !isUploadOpen &&
+                            !isFolderModalOpen &&
+                            !isEditProfileOpen &&
+                            !viewingCreator
+                          }
+                          onVideoEnded={handleAutoScrollNext}
                           onToggleMute={() => setIsMuted((m) => !m)}
                           onToggleLike={handleToggleLike}
                           onToggleBookmark={handleToggleBookmark}
@@ -990,9 +1230,27 @@ export default function App() {
                             setDesktopSideTab('effects');
                             setMobileSheet('effects');
                           }}
-                          onOpenProfile={(_username, isOwn) => {
-                            if (isOwn) setActiveTab('profile');
-                            else setIsEditProfileOpen(false);
+                          onOpenProfile={(username, isOwn) => {
+                            if (isOwn) {
+                              setActiveTab('profile');
+                            } else {
+                              const matched = fakeFriends.find(
+                                (f) =>
+                                  f.id === video.creatorFriendId ||
+                                  f.username.toLowerCase() === username.toLowerCase()
+                              );
+                              setViewingCreator(
+                                matched || {
+                                  id: video.creatorFriendId || `creator-${username}`,
+                                  displayName: video.creatorName,
+                                  username: video.creatorUsername,
+                                  bio: 'Kreator KlipLokal',
+                                  avatarUrl: video.creatorAvatar,
+                                  followersCount: 4200,
+                                  followingCount: 95,
+                                }
+                              );
+                            }
                           }}
                         />
                       </div>
@@ -1068,7 +1326,7 @@ export default function App() {
                   {desktopSideTab === 'comments' ? (
                     <CommentsPanel
                       video={activeVideo}
-                      currentUser={profile}
+                      currentUser={activeActorProfile}
                       isOpen={true}
                       isDesktopDocked={true}
                       onClose={() => {}}
@@ -1102,7 +1360,7 @@ export default function App() {
         {activeTab === 'folder' && (
           <FolderSyncView
             isModal={false}
-            currentUser={profile}
+            currentUser={activeActorProfile}
             folderConnections={folderConnections}
             storedVideos={videos}
             onImportFolderVideos={handleImportFolderVideos}
@@ -1126,6 +1384,7 @@ export default function App() {
             onOpenUpload={() => setIsUploadOpen(true)}
             onOpenFolderModal={() => setIsFolderModalOpen(true)}
             onOpenInstallModal={() => setIsInstallOpen(true)}
+            onOpenSettings={() => setIsSettingsOpen(true)}
             onSelectVideo={jumpToVideoInFeed}
             onDeleteVideo={handleDeleteVideo}
           />
@@ -1211,7 +1470,7 @@ export default function App() {
       <div className="xl:hidden">
         <CommentsPanel
           video={activeVideo}
-          currentUser={profile}
+          currentUser={activeActorProfile}
           isOpen={mobileSheet === 'comments'}
           onClose={() => setMobileSheet('none')}
           onAddComment={handleAddComment}
@@ -1230,7 +1489,7 @@ export default function App() {
       {/* MODALS */}
       <UploadVideoModal
         isOpen={isUploadOpen}
-        currentUser={profile}
+        currentUser={activeActorProfile}
         existingFolderVideos={folderVideos}
         availableFolders={availableFolderNames}
         defaultFolderName={uploadDefaultFolder}
@@ -1244,7 +1503,7 @@ export default function App() {
       <FolderSyncView
         isModal={true}
         isOpen={isFolderModalOpen}
-        currentUser={profile}
+        currentUser={activeActorProfile}
         folderConnections={folderConnections}
         storedVideos={videos}
         onClose={() => setIsFolderModalOpen(false)}
@@ -1270,6 +1529,28 @@ export default function App() {
       <InstallAppModal
         isOpen={isInstallOpen}
         onClose={() => setIsInstallOpen(false)}
+      />
+
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        profile={profile}
+        fakeFriends={fakeFriends}
+        appSettings={appSettings}
+        videos={videos}
+        folderConnections={folderConnections}
+        onClose={() => setIsSettingsOpen(false)}
+        onUpdateAppSettings={handleUpdateAppSettings}
+        onUpdateFakeFriend={handleUpdateFakeFriend}
+        onRestoreBackup={handleRestoreBackup}
+        onReseedFriendStarters={handleReseedFriendStarters}
+      />
+
+      <CreatorProfileModal
+        creator={viewingCreator}
+        videos={videos}
+        onClose={() => setViewingCreator(null)}
+        onToggleFollow={handleToggleFollow}
+        onSelectVideo={jumpToVideoInFeed}
       />
     </div>
   );

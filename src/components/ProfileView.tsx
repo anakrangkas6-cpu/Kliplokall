@@ -8,6 +8,7 @@ import {
   Pencil,
   Play,
   Plus,
+  Settings,
   Smartphone,
   Trash2,
 } from 'lucide-react';
@@ -21,6 +22,7 @@ interface ProfileViewProps {
   onOpenUpload: () => void;
   onOpenFolderModal: () => void;
   onOpenInstallModal: () => void;
+  onOpenSettings: () => void;
   onSelectVideo: (videoId: string) => void;
   onDeleteVideo: (videoId: string) => void;
 }
@@ -34,6 +36,7 @@ export function ProfileView({
   onOpenUpload,
   onOpenFolderModal,
   onOpenInstallModal,
+  onOpenSettings,
   onSelectVideo,
   onDeleteVideo,
 }: ProfileViewProps) {
@@ -54,7 +57,21 @@ export function ProfileView({
 
   return (
     <div className="h-full w-full overflow-y-auto bg-[#0a0a0a] text-white pb-20 lg:pb-8">
-      <div className="mx-auto max-w-4xl px-4 pt-6 sm:px-8 sm:pt-10">
+      <div className="mx-auto max-w-4xl px-4 pt-4 sm:px-8 sm:pt-8">
+        {/* Top Profile Utility Bar with discreet Settings gear */}
+        <div className="mb-3 flex items-center justify-between">
+          <span className="text-xs font-semibold text-zinc-400">@{profile.username}</span>
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            aria-label="Pengaturan"
+            className="inline-flex h-10 items-center gap-1.5 rounded-full bg-white/[0.06] px-3.5 text-xs font-semibold text-zinc-200 transition-colors hover:bg-white/15 hover:text-white"
+          >
+            <Settings className="h-4 w-4" />
+            <span>Pengaturan</span>
+          </button>
+        </div>
+
         {/* Profile Header */}
         <div className="flex flex-col items-center text-center sm:flex-row sm:items-start sm:text-left sm:gap-7">
           <div className="relative shrink-0">

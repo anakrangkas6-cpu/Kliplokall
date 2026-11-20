@@ -1,5 +1,10 @@
-import type { FolderConnection, UserProfile, VideoItem } from '../types';
-import { createStarterVideos, DEFAULT_USER_PROFILE } from './starterData';
+import type { AppSettings, FakeFriend, FolderConnection, UserProfile, VideoItem } from '../types';
+import {
+  createStarterVideos,
+  DEFAULT_APP_SETTINGS,
+  DEFAULT_FAKE_FRIENDS,
+  DEFAULT_USER_PROFILE,
+} from './starterData';
 
 const DB_NAME = 'klip_lokal_offline_db';
 const DB_VERSION = 1;
@@ -10,6 +15,7 @@ const STORE_FOLDER = 'folder_meta';
 const STORE_HANDLES = 'directory_handles';
 
 const SEEDED_KEY = 'klip_lokal_seeded_v1';
+const FRIENDS_SEEDED_KEY = 'klip_lokal_friends_seeded_v2';
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -68,15 +74,65 @@ export async function saveStoredProfile(profile: UserProfile): Promise<void> {
   await withStore(STORE_PROFILE, 'readwrite', (s) => s.put(profile, 'current_user'));
 }
 
-export async function getAllStoredVideos(): Promise<VideoItem[]> {
-  const list = await withStore<VideoItem[]>(STORE_VIDEOS, 'readonly', (s) => s.getAll());
-  if ((!list || list.length === 0) && !localStorage.getItem(SEEDED_KEY)) {
-    const starters = createStarterVideos();
+export async function getFakeFriends(): Promise<FakeFriend[]> {
+  try {
+    const stored = await withStore<FakeFriend[] | undefined>(STORE_PROFILE, 'readonly', (s) =>
+      s.get('fake_friends')
+    );
+    if (Array.isArray(stored) && stored.length > 0) return stored;
+  } catch {
+    // ignore and seed defaults
+  }
+  await saveFakeFriends(DEFAULT_FAKE_FRIENDS);
+  return DEFAULT_FAKE_FRIENDS;
+}
+
+export async function saveFakeFriends(friends: FakeFriend[]): Promise<void> {
+  await withStore(STORE_PROFILE, 'readwrite', (s) => s.put(friends, 'fake_friends'));
+}
+
+export async function getAppSettings(): Promise<AppSettings> {
+  try {
+    const stored = await withStore<AppSettings | undefined>(STORE_PROFILE, 'readonly', (s) =>
+      s.get('app_settings')
+    );
+    if (stored && typeof stored.autoScrollEnabled === 'boolean') {
+      return { ...DEFAULT_APP_SETTINGS, ...stored };
+    }
+  } catch {
+    // ignore
+  }
+  await saveAppSettings(DEFAULT_APP_SETTINGS);
+  return DEFAULT_APP_SETTINGS;
+}
+
+export async function saveAppSettings(settings: AppSettings): Promise<void> {
+  await withStore(STORE_PROFILE, 'readwrite', (s) => s.put(settings, 'app_settings'));
+}
+
+export async function getAllStoredVideos(friends?: FakeFriend[]): Promise<VideoItem[]> {
+  const list = (await withStore<VideoItem[]>(STORE_VIDEOS, 'readonly', (s) => s.getAll())) || [];
+  if (list.length === 0 && !localStorage.getItem(SEEDED_KEY)) {
+    const starters = createStarterVideos(friends);
     await saveVideosBatch(starters);
     localStorage.setItem(SEEDED_KEY, '1');
+    localStorage.setItem(FRIENDS_SEEDED_KEY, '1');
     return starters.sort((a, b) => b.createdAt - a.createdAt);
   }
-  return (list || []).sort((a, b) => b.createdAt - a.createdAt);
+
+  // Non-destructive one-time upgrade for existing installations to add clips from all 10 friends
+  if (!localStorage.getItem(FRIENDS_SEEDED_KEY)) {
+    const starters = createStarterVideos(friends);
+    const existingIds = new Set(list.map((v) => v.id));
+    const missing = starters.filter((s) => !existingIds.has(s.id));
+    if (missing.length > 0) {
+      await saveVideosBatch(missing);
+      list.push(...missing);
+    }
+    localStorage.setItem(FRIENDS_SEEDED_KEY, '1');
+  }
+
+  return list.sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export async function saveStoredVideo(video: VideoItem): Promise<void> {
@@ -115,6 +171,10 @@ export async function saveVideosBatch(videos: VideoItem[]): Promise<void> {
 
 export async function deleteStoredVideo(videoId: string): Promise<void> {
   await withStore(STORE_VIDEOS, 'readwrite', (s) => s.delete(videoId));
+}
+
+export async function clearAllStoredVideos(): Promise<void> {
+  await withStore(STORE_VIDEOS, 'readwrite', (s) => s.clear());
 }
 
 export async function clearVideosByFolderName(folderName: string): Promise<void> {
