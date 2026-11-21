@@ -393,7 +393,7 @@ export function UploadVideoModal({
             <div>
               <h2 className="text-base font-bold tracking-tight">Tambah Video / Foto & Efek</h2>
               <p className="text-xs text-zinc-400">
-                Unggah video atau foto + musik dan simpan rapi ke folder pilihan Anda
+                Diunggah sebagai <span className="font-semibold text-white">@{currentUser.username}</span> · simpan rapi ke folder pilihan Anda
               </p>
             </div>
           </div>

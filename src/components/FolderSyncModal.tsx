@@ -651,7 +651,18 @@ export function FolderSyncView({
                     </div>
                     <div className="absolute right-2 bottom-2 left-2">
                       <p className="truncate text-xs font-semibold text-white">{v.title}</p>
-                      <p className="truncate font-mono-tabular text-[10px] text-zinc-300">
+                      <div className="mt-1 flex items-center gap-1.5">
+                        <img
+                          src={v.creatorAvatar}
+                          alt={v.creatorName}
+                          referrerPolicy="no-referrer"
+                          className="h-4 w-4 shrink-0 rounded-full object-cover border border-white/30"
+                        />
+                        <span className="truncate text-[10px] font-semibold text-white/95">
+                          @{v.creatorUsername}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 truncate font-mono-tabular text-[10px] text-zinc-300">
                         {v.folderName || 'Koleksi'} · {formatFileSize(v.fileSize)}
                       </p>
                     </div>

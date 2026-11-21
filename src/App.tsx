@@ -69,6 +69,29 @@ import {
 import { cleanFileTitle, extractVideoMetadata, isVideoFile } from './utils/videoHelpers';
 
 const LAST_FIRST_VIDEO_KEY = 'klip_lokal_last_first_video';
+const FOLDER_FRIENDS_MIGRATED_KEY = 'klip_lokal_folder_creators_v1';
+
+function pickFriendForFolderVideo(
+  folderName: string,
+  index: number,
+  friends: FakeFriend[]
+): FakeFriend | null {
+  if (friends.length === 0) return null;
+  const normFolder = folderName.trim().toLowerCase();
+  if (normFolder) {
+    const matched = friends.find((f) => {
+      const displayLower = f.displayName.trim().toLowerCase();
+      const firstName = displayLower.split(/\s+/)[0];
+      return (
+        displayLower === normFolder ||
+        firstName === normFolder ||
+        f.username.trim().toLowerCase() === normFolder
+      );
+    });
+    if (matched) return matched;
+  }
+  return friends[index % friends.length];
+}
 
 function buildShuffledFeedIds(items: VideoItem[], avoidFirstId?: string | null): string[] {
   const ids = items.map((v) => v.id);
@@ -127,14 +150,50 @@ export default function App() {
         ]);
         const storedVideos = await getAllStoredVideos(storedFriends);
         if (cancelled) return;
+
+        let hydratedVideos = storedVideos;
+        const autoAssignEnabled = storedSettings.autoAssignFolderFriends ?? true;
+        const alreadyMigrated = localStorage.getItem(FOLDER_FRIENDS_MIGRATED_KEY) === '1';
+        if (autoAssignEnabled && !alreadyMigrated && storedFriends.length > 0) {
+          let folderIdx = 0;
+          const migratedBatch: VideoItem[] = [];
+          hydratedVideos = storedVideos.map((v) => {
+            if (v.sourceType === 'folder' && !v.creatorFriendId) {
+              const friend = pickFriendForFolderVideo(
+                v.folderName || '',
+                folderIdx++,
+                storedFriends
+              );
+              if (friend) {
+                const updated: VideoItem = {
+                  ...v,
+                  creatorName: friend.displayName,
+                  creatorUsername: friend.username,
+                  creatorAvatar: friend.avatarUrl,
+                  creatorFriendId: friend.id,
+                  isOwnUpload: false,
+                };
+                migratedBatch.push(updated);
+                return updated;
+              }
+            }
+            return v;
+          });
+          if (migratedBatch.length > 0) {
+            await saveVideosBatch(migratedBatch);
+          }
+          localStorage.setItem(FOLDER_FRIENDS_MIGRATED_KEY, '1');
+        }
+
+        if (cancelled) return;
         setProfile(storedProfile);
         setFakeFriends(storedFriends);
         setAppSettings(storedSettings);
-        setVideos(storedVideos);
+        setVideos(hydratedVideos);
         setFolderConnections(storedFolders);
 
         const lastFirstId = localStorage.getItem(LAST_FIRST_VIDEO_KEY);
-        const shuffledIds = buildShuffledFeedIds(storedVideos, lastFirstId);
+        const shuffledIds = buildShuffledFeedIds(hydratedVideos, lastFirstId);
         setFeedOrderIds(shuffledIds);
         if (shuffledIds.length > 0) {
           localStorage.setItem(LAST_FIRST_VIDEO_KEY, shuffledIds[0]);
@@ -481,8 +540,19 @@ export default function App() {
     );
   }, []);
 
-  // Profile Update (syncs avatar & name to all own videos)
+  // Profile Update (syncs avatar & name for whichever account is active: main user OR active fake friend)
   const handleSaveProfile = async (updatedProfile: UserProfile) => {
+    if (activeFakeFriend) {
+      await handleUpdateFakeFriend({
+        ...activeFakeFriend,
+        displayName: updatedProfile.displayName,
+        username: updatedProfile.username,
+        bio: updatedProfile.bio,
+        avatarUrl: updatedProfile.avatarUrl,
+      });
+      return;
+    }
+
     setProfile(updatedProfile);
     await saveStoredProfile(updatedProfile);
 
@@ -567,6 +637,33 @@ export default function App() {
       setFeedOrderIds((prev) => [...missing.map((m) => m.id), ...prev]);
     }
     return missing.length;
+  };
+
+  const handleReassignFolderCreators = async (): Promise<number> => {
+    if (fakeFriends.length === 0) return 0;
+    let idx = 0;
+    const updatedBatch: VideoItem[] = [];
+    const nextVideos = videos.map((v) => {
+      if (v.sourceType !== 'folder') return v;
+      const friend = pickFriendForFolderVideo(v.folderName || '', idx++, fakeFriends);
+      if (!friend) return v;
+      const updated: VideoItem = {
+        ...v,
+        creatorName: friend.displayName,
+        creatorUsername: friend.username,
+        creatorAvatar: friend.avatarUrl,
+        creatorFriendId: friend.id,
+        isOwnUpload: false,
+      };
+      updatedBatch.push(updated);
+      return updated;
+    });
+
+    if (updatedBatch.length > 0) {
+      setVideos(nextVideos);
+      await saveVideosBatch(updatedBatch);
+    }
+    return updatedBatch.length;
   };
 
   const handleRestoreBackup = async (parsed: ParsedBackup, mode: 'merge' | 'replace') => {
@@ -725,6 +822,12 @@ export default function App() {
       (v) => !existingKeys.has(`${v.folderName || ''}::${v.fileName}::${v.fileSize}`)
     );
 
+    const baseFolderOffset = videos.filter((v) => v.sourceType === 'folder').length;
+    const shouldAutoAssignFriends =
+      !activeFakeFriend &&
+      (appSettings.autoAssignFolderFriends ?? true) &&
+      fakeFriends.length > 0;
+
     const newOnes: VideoItem[] = activeFakeFriend
       ? rawNewOnes.map((v) => ({
           ...v,
@@ -734,7 +837,24 @@ export default function App() {
           creatorFriendId: activeFakeFriend.id,
           isOwnUpload: false,
         }))
-      : rawNewOnes;
+      : shouldAutoAssignFriends
+        ? rawNewOnes.map((v, idx) => {
+            const friend = pickFriendForFolderVideo(
+              v.folderName || connection.folderName,
+              baseFolderOffset + idx,
+              fakeFriends
+            );
+            if (!friend) return v;
+            return {
+              ...v,
+              creatorName: friend.displayName,
+              creatorUsername: friend.username,
+              creatorAvatar: friend.avatarUrl,
+              creatorFriendId: friend.id,
+              isOwnUpload: false,
+            };
+          })
+        : rawNewOnes;
 
     if (newOnes.length > 0) {
       await saveVideosBatch(newOnes);
@@ -1047,14 +1167,18 @@ export default function App() {
             className="flex min-w-0 flex-1 items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-white/[0.06]"
           >
             <img
-              src={profile.avatarUrl}
-              alt={profile.displayName}
+              src={activeActorProfile.avatarUrl}
+              alt={activeActorProfile.displayName}
               referrerPolicy="no-referrer"
               className="h-10 w-10 shrink-0 rounded-full object-cover border border-white/15"
             />
             <div className="min-w-0 flex-1">
-              <div className="truncate text-xs font-bold text-white">{profile.displayName}</div>
-              <div className="truncate text-[11px] text-zinc-400">@{profile.username}</div>
+              <div className="truncate text-xs font-bold text-white">
+                {activeActorProfile.displayName}
+              </div>
+              <div className="truncate text-[11px] text-zinc-400">
+                @{activeActorProfile.username}
+              </div>
             </div>
           </button>
           <button
@@ -1378,7 +1502,8 @@ export default function App() {
 
         {activeTab === 'profile' && (
           <ProfileView
-            profile={profile}
+            profile={activeActorProfile}
+            activeFriendId={activeFakeFriend?.id ?? null}
             videos={videos}
             onEditProfile={() => setIsEditProfileOpen(true)}
             onOpenUpload={() => setIsUploadOpen(true)}
@@ -1455,7 +1580,7 @@ export default function App() {
           }`}
         >
           <img
-            src={profile.avatarUrl}
+            src={activeActorProfile.avatarUrl}
             alt="Profil"
             referrerPolicy="no-referrer"
             className={`h-5 w-5 rounded-full object-cover ${
@@ -1521,7 +1646,7 @@ export default function App() {
 
       <EditProfileModal
         isOpen={isEditProfileOpen}
-        profile={profile}
+        profile={activeActorProfile}
         onClose={() => setIsEditProfileOpen(false)}
         onSave={handleSaveProfile}
       />
@@ -1541,8 +1666,17 @@ export default function App() {
         onClose={() => setIsSettingsOpen(false)}
         onUpdateAppSettings={handleUpdateAppSettings}
         onUpdateFakeFriend={handleUpdateFakeFriend}
+        onUploadAsFriend={async (friendId) => {
+          await handleUpdateAppSettings({
+            ...appSettings,
+            activeIdentityFriendId: friendId,
+          });
+          setIsSettingsOpen(false);
+          setIsUploadOpen(true);
+        }}
         onRestoreBackup={handleRestoreBackup}
         onReseedFriendStarters={handleReseedFriendStarters}
+        onReassignFolderCreators={handleReassignFolderCreators}
       />
 
       <CreatorProfileModal

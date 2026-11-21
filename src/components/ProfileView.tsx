@@ -17,6 +17,7 @@ import { formatCompactNumber, formatDuration } from '../utils/format';
 
 interface ProfileViewProps {
   profile: UserProfile;
+  activeFriendId?: string | null;
   videos: VideoItem[];
   onEditProfile: () => void;
   onOpenUpload: () => void;
@@ -31,6 +32,7 @@ type ProfileTab = 'my_videos' | 'liked' | 'bookmarked';
 
 export function ProfileView({
   profile,
+  activeFriendId = null,
   videos,
   onEditProfile,
   onOpenUpload,
@@ -42,7 +44,13 @@ export function ProfileView({
 }: ProfileViewProps) {
   const [activeTab, setActiveTab] = useState<ProfileTab>('my_videos');
 
-  const myVideos = videos.filter((v) => v.isOwnUpload);
+  const myVideos = activeFriendId
+    ? videos.filter(
+        (v) =>
+          v.creatorFriendId === activeFriendId ||
+          v.creatorUsername.toLowerCase() === profile.username.toLowerCase()
+      )
+    : videos.filter((v) => v.isOwnUpload);
   const likedVideos = videos.filter((v) => v.isLiked);
   const bookmarkedVideos = videos.filter((v) => v.isBookmarked);
 
@@ -259,7 +267,7 @@ export function ProfileView({
                     </span>
                   </button>
 
-                  {v.isOwnUpload && activeTab === 'my_videos' && (
+                  {activeTab === 'my_videos' && (
                     <button
                       type="button"
                       onClick={(e) => {

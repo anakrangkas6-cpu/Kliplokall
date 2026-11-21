@@ -33,6 +33,7 @@ export const DEFAULT_USER_PROFILE: UserProfile = {
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   autoScrollEnabled: true,
   activeIdentityFriendId: null,
+  autoAssignFolderFriends: true,
 };
 
 export const DEFAULT_FAKE_FRIENDS: FakeFriend[] = [

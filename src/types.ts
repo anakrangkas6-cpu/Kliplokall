@@ -96,6 +96,7 @@ export interface FakeFriend {
 export interface AppSettings {
   autoScrollEnabled: boolean;
   activeIdentityFriendId: string | null;
+  autoAssignFolderFriends?: boolean;
   lastBackupAt?: number;
 }
 

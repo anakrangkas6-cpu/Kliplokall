@@ -31,8 +31,10 @@ interface SettingsModalProps {
   onClose: () => void;
   onUpdateAppSettings: (next: AppSettings) => Promise<void>;
   onUpdateFakeFriend: (friend: FakeFriend) => Promise<void>;
+  onUploadAsFriend: (friendId: string) => Promise<void>;
   onRestoreBackup: (parsed: ParsedBackup, mode: 'merge' | 'replace') => Promise<void>;
   onReseedFriendStarters: () => Promise<number>;
+  onReassignFolderCreators: () => Promise<number>;
 }
 
 type SettingsTab = 'playback' | 'backup' | 'friends';
@@ -47,8 +49,10 @@ export function SettingsModal({
   onClose,
   onUpdateAppSettings,
   onUpdateFakeFriend,
+  onUploadAsFriend,
   onRestoreBackup,
   onReseedFriendStarters,
+  onReassignFolderCreators,
 }: SettingsModalProps) {
   const backupInputRef = useRef<HTMLInputElement | null>(null);
   const friendAvatarInputRef = useRef<HTMLInputElement | null>(null);
@@ -563,20 +567,72 @@ export function SettingsModal({
                       seolah-olah dia yang memposting. Semua pengaturan ini tersembunyi di sini.
                     </p>
                   </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const updatedCount = await onReassignFolderCreators();
+                        setStatusMsg(
+                          updatedCount > 0
+                            ? `${updatedCount} video folder otomatis diberi nama & foto profil 10 teman.`
+                            : 'Belum ada video di folder untuk dibagikan.'
+                        );
+                      }}
+                      className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-white/10 px-3 text-xs font-semibold text-white hover:bg-white/20"
+                    >
+                      <Users className="h-3.5 w-3.5 text-[#FE2C55]" />
+                      <span>Bagikan Nama ke Video Folder</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const added = await onReseedFriendStarters();
+                        setStatusMsg(
+                          added > 0
+                            ? `${added} klip contoh teman rekayasa berhasil ditambahkan ke feed.`
+                            : 'Semua 10 teman sudah memiliki klip di feed.'
+                        );
+                      }}
+                      className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-white/10 px-3 text-xs font-semibold text-[#25F4EE] hover:bg-white/20"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      <span>Lengkapi Klip 10 Teman</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Toggle auto-assign folder videos to 10 fake friends */}
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/30 px-3.5 py-2.5">
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-white">
+                      Otomatis pakai nama 10 teman untuk video Folder
+                    </div>
+                    <div className="text-[11px] text-zinc-400">
+                      Video yang masuk ke folder otomatis bergantian memakai nama & foto profil 10
+                      teman (atau mengikuti nama folder jika sama dengan nama teman).
+                    </div>
+                  </div>
                   <button
                     type="button"
-                    onClick={async () => {
-                      const added = await onReseedFriendStarters();
-                      setStatusMsg(
-                        added > 0
-                          ? `${added} klip contoh teman rekayasa berhasil ditambahkan ke feed.`
-                          : 'Semua 10 teman sudah memiliki klip di feed.'
-                      );
-                    }}
-                    className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-white/10 px-3 text-xs font-semibold text-[#25F4EE] hover:bg-white/20"
+                    role="switch"
+                    aria-checked={appSettings.autoAssignFolderFriends ?? true}
+                    onClick={() =>
+                      onUpdateAppSettings({
+                        ...appSettings,
+                        autoAssignFolderFriends: !(appSettings.autoAssignFolderFriends ?? true),
+                      })
+                    }
+                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                      appSettings.autoAssignFolderFriends ?? true ? 'bg-[#25F4EE]' : 'bg-white/15'
+                    }`}
                   >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                    <span>Lengkapi Klip 10 Teman</span>
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-black transition-transform ${
+                        appSettings.autoAssignFolderFriends ?? true
+                          ? 'translate-x-6'
+                          : 'translate-x-1'
+                      }`}
+                    />
                   </button>
                 </div>
 
@@ -649,7 +705,7 @@ export function SettingsModal({
                           : 'border-white/10 bg-white/[0.03]'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="flex items-center gap-3 min-w-0">
                           <div className="relative shrink-0">
                             <img
@@ -686,14 +742,23 @@ export function SettingsModal({
                           </div>
                         </div>
 
-                        <div className="flex shrink-0 items-center gap-1.5">
+                        <div className="flex flex-wrap shrink-0 items-center gap-1.5">
                           <button
                             type="button"
                             onClick={() => openFriendEditor(friend)}
                             aria-label={`Edit profil ${friend.displayName}`}
+                            title="Edit nama, username & foto"
                             className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/10 text-zinc-300 hover:bg-white/20 hover:text-white"
                           >
                             <Pencil className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onUploadAsFriend(friend.id)}
+                            className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-[#25F4EE]/15 px-3 text-xs font-bold text-[#25F4EE] transition-colors hover:bg-[#25F4EE]/25"
+                          >
+                            <Upload className="h-3.5 w-3.5" />
+                            <span>Upload Video</span>
                           </button>
                           <button
                             type="button"
