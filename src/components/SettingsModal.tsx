@@ -18,10 +18,55 @@ import {
   X,
 } from 'lucide-react';
 import type { AppSettings, FakeFriend, FolderConnection, UserProfile, VideoItem } from '../types';
-import { createBackupArchiveBlob, parseBackupArchiveFile, type ParsedBackup } from '../utils/backup';
+import {
+  buildBackupFileName,
+  createBackupArchiveBlob,
+  parseBackupArchiveFile,
+  streamBackupToWriter,
+  type ParsedBackup,
+} from '../utils/backup';
 import { formatFileSize, formatRelativeTime } from '../utils/format';
 import { makeAvatarDataUrl, PRESET_AVATARS } from '../utils/starterData';
 import { readImageAsDataUrl } from '../utils/videoHelpers';
+
+interface AndroidBackupBridge {
+  startSave: (fileName: string) => string;
+  appendChunkBase64: (base64Chunk: string) => string;
+  finishSave: () => string;
+  abortSave: () => void;
+  shareLastSaved: () => string;
+}
+
+interface FileSystemWritableLike {
+  write: (data: Uint8Array) => Promise<void>;
+  close: () => Promise<void>;
+}
+
+interface FileSystemFileHandleLike {
+  name?: string;
+  createWritable: () => Promise<FileSystemWritableLike>;
+}
+
+declare global {
+  interface Window {
+    KlipAndroidBackup?: AndroidBackupBridge;
+    Capacitor?: { isNativePlatform?: () => boolean };
+    showSaveFilePicker?: (options?: {
+      suggestedName?: string;
+      types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+    }) => Promise<FileSystemFileHandleLike>;
+  }
+}
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const step = 0x4000;
+  for (let i = 0; i < bytes.length; i += step) {
+    const slice = bytes.subarray(i, Math.min(i + step, bytes.length));
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
+}
 
 const AVATAR_COLOR_PALETTES: Array<[string, string]> = [
   ['#fe2c55', '#fb923c'],
@@ -86,6 +131,7 @@ export function SettingsModal({
     blob: Blob;
     fileName: string;
   } | null>(null);
+  const [lastSavedPath, setLastSavedPath] = useState<string | null>(null);
 
   // Fake friends editing & creation state
   const [pendingAvatarFriendId, setPendingAvatarFriendId] = useState<string | null>(null);
@@ -125,7 +171,124 @@ export function SettingsModal({
     setIsBackingUp(true);
     setProgressText('Menyiapkan cadangan...');
 
+    const androidBridge = typeof window !== 'undefined' ? window.KlipAndroidBackup : undefined;
+    const fileName = buildBackupFileName();
+
     try {
+      // 1. Native Android APK bridge: streams directly to Internal Storage -> Download/KlipLokal
+      if (androidBridge) {
+        const startRes = JSON.parse(androidBridge.startSave(fileName)) as {
+          ok: boolean;
+          path?: string;
+          error?: string;
+        };
+        if (!startRes.ok) {
+          throw new Error(startRes.error || 'Gagal membuka folder Download di perangkat.');
+        }
+
+        try {
+          const result = await streamBackupToWriter(
+            {
+              profile,
+              fakeFriends,
+              folderConnections,
+              appSettings,
+              videos,
+            },
+            (chunk) => {
+              const appendRes = JSON.parse(
+                androidBridge.appendChunkBase64(uint8ToBase64(chunk))
+              ) as { ok: boolean; error?: string };
+              if (!appendRes.ok) {
+                throw new Error(appendRes.error || 'Gagal menulis data cadangan ke HP.');
+              }
+            },
+            (bytesWritten, totalBytes, cur, tot) => {
+              const pct =
+                totalBytes > 0 ? Math.min(100, Math.round((bytesWritten / totalBytes) * 100)) : 0;
+              setProgressText(`Menyimpan ke Download/KlipLokal (${cur}/${tot}) · ${pct}%`);
+            }
+          );
+
+          const finishRes = JSON.parse(androidBridge.finishSave()) as {
+            ok: boolean;
+            path?: string;
+            error?: string;
+          };
+          if (!finishRes.ok) {
+            throw new Error(finishRes.error || 'Gagal menyelesaikan penyimpanan berkas.');
+          }
+
+          const savedWhere =
+            finishRes.path || startRes.path || `Penyimpanan Internal / Download / KlipLokal / ${fileName}`;
+          setLastSavedPath(savedWhere);
+
+          const updatedSettings: AppSettings = { ...appSettings, lastBackupAt: Date.now() };
+          await onUpdateAppSettings(updatedSettings);
+
+          setStatusMsg(
+            `Cadangan (${formatFileSize(result.totalBytes)}) berhasil disimpan ke: ${savedWhere}`
+          );
+
+          if (preferShare) {
+            androidBridge.shareLastSaved();
+          }
+          return;
+        } catch (streamErr) {
+          androidBridge.abortSave();
+          throw streamErr;
+        }
+      }
+
+      // 2. Modern browser Save-As picker: lets user choose exact destination folder
+      if (!preferShare && typeof window !== 'undefined' && typeof window.showSaveFilePicker === 'function') {
+        const fileHandle = await window.showSaveFilePicker({
+          suggestedName: fileName,
+          types: [
+            {
+              description: 'Cadangan KlipLokal',
+              accept: { 'application/octet-stream': ['.klipbackup'] },
+            },
+          ],
+        });
+        const writable = await fileHandle.createWritable();
+        try {
+          const result = await streamBackupToWriter(
+            {
+              profile,
+              fakeFriends,
+              folderConnections,
+              appSettings,
+              videos,
+            },
+            async (chunk) => {
+              await writable.write(chunk);
+            },
+            (bytesWritten, totalBytes, cur, tot) => {
+              const pct =
+                totalBytes > 0 ? Math.min(100, Math.round((bytesWritten / totalBytes) * 100)) : 0;
+              setProgressText(`Menyimpan berkas (${cur}/${tot}) · ${pct}%`);
+            }
+          );
+          await writable.close();
+
+          const chosenName = fileHandle.name || fileName;
+          setLastSavedPath(chosenName);
+          await onUpdateAppSettings({ ...appSettings, lastBackupAt: Date.now() });
+          setStatusMsg(
+            `Berkas "${chosenName}" (${formatFileSize(result.totalBytes)}) berhasil disimpan ke folder yang Anda pilih.`
+          );
+          return;
+        } catch (pickerStreamErr) {
+          await writable.close().catch(() => {});
+          throw pickerStreamErr;
+        }
+      }
+
+      // 3. Fallback for standard web browsers
+      const isNativeCapacitor =
+        typeof window !== 'undefined' && Boolean(window.Capacitor?.isNativePlatform?.());
+
       const archive = await createBackupArchiveBlob(
         {
           profile,
@@ -138,9 +301,6 @@ export function SettingsModal({
       );
 
       setLastGeneratedArchive({ blob: archive.blob, fileName: archive.fileName });
-
-      const updatedSettings: AppSettings = { ...appSettings, lastBackupAt: Date.now() };
-      await onUpdateAppSettings(updatedSettings);
 
       const fileObj = new File([archive.blob], archive.fileName, {
         type: 'application/octet-stream',
@@ -157,8 +317,13 @@ export function SettingsModal({
           text: `Cadangan ${videos.length} video & pengaturan KlipLokal`,
           files: [fileObj],
         });
+        await onUpdateAppSettings({ ...appSettings, lastBackupAt: Date.now() });
         setStatusMsg(
           `Cadangan (${formatFileSize(archive.totalBytes)}) berhasil dibagikan/disimpan.`
+        );
+      } else if (isNativeCapacitor) {
+        setErrorMsg(
+          'APK versi ini belum mendukung penulisan langsung ke folder Download. Perbarui APK dengan kode terbaru agar cadangan tersimpan otomatis ke Download/KlipLokal.'
         );
       } else {
         const url = URL.createObjectURL(archive.blob);
@@ -169,15 +334,21 @@ export function SettingsModal({
         a.click();
         document.body.removeChild(a);
         window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+        setLastSavedPath(`Folder Download browser / ${archive.fileName}`);
+        await onUpdateAppSettings({ ...appSettings, lastBackupAt: Date.now() });
         setStatusMsg(
-          `Berkas "${archive.fileName}" (${formatFileSize(archive.totalBytes)}) berhasil dibuat. Simpan berkas ini sebelum menghapus atau memperbarui aplikasi.`
+          `Berkas "${archive.fileName}" (${formatFileSize(archive.totalBytes)}) diunduh ke folder Download browser Anda.`
         );
       }
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
-        setStatusMsg('Pembagian cadangan dibatalkan.');
+        setStatusMsg('Penyimpanan cadangan dibatalkan.');
       } else {
-        setErrorMsg('Gagal membuat berkas cadangan offline.');
+        setErrorMsg(
+          err instanceof Error && err.message
+            ? err.message
+            : 'Gagal membuat berkas cadangan offline.'
+        );
       }
     } finally {
       setIsBackingUp(false);
@@ -186,6 +357,12 @@ export function SettingsModal({
   };
 
   const handleShareExistingBackup = async () => {
+    const androidBridge = typeof window !== 'undefined' ? window.KlipAndroidBackup : undefined;
+    if (androidBridge && lastSavedPath) {
+      const res = JSON.parse(androidBridge.shareLastSaved()) as { ok: boolean; error?: string };
+      if (res.ok) return;
+    }
+
     if (!lastGeneratedArchive) {
       await handleExportBackup(true);
       return;
@@ -200,7 +377,7 @@ export function SettingsModal({
           files: [fileObj],
         });
       } else {
-        await handleExportBackup(false);
+        await handleExportBackup(true);
       }
     } catch {
       // ignore user cancel
@@ -588,6 +765,15 @@ export function SettingsModal({
                   </p>
                 )}
 
+                <div className="rounded-xl border border-white/10 bg-black/35 px-3.5 py-2.5 text-[11px] text-zinc-300 space-y-0.5">
+                  <div className="font-semibold text-white">Lokasi penyimpanan cadangan di HP:</div>
+                  <div className="text-zinc-400 break-all">
+                    {lastSavedPath
+                      ? lastSavedPath
+                      : 'Penyimpanan Internal / Download / KlipLokal (file .klipbackup)'}
+                  </div>
+                </div>
+
                 {(isBackingUp || isRestoring) && progressText && (
                   <div className="flex items-center gap-2.5 rounded-xl bg-white/[0.06] px-3.5 py-2.5 text-xs font-semibold text-white">
                     <Loader2 className="h-4 w-4 animate-spin text-[#FE2C55]" />
@@ -603,7 +789,7 @@ export function SettingsModal({
                     className="inline-flex h-10 items-center gap-2 rounded-xl bg-[#FE2C55] px-4 text-xs font-bold text-white hover:bg-[#e52349] disabled:opacity-50"
                   >
                     <Download className="h-4 w-4" />
-                    <span>Unduh Cadangan (.klipbackup)</span>
+                    <span>Simpan Cadangan (.klipbackup)</span>
                   </button>
                   <button
                     type="button"
@@ -612,7 +798,7 @@ export function SettingsModal({
                     className="inline-flex h-10 items-center gap-2 rounded-xl border border-white/15 bg-white/[0.05] px-4 text-xs font-semibold text-white hover:bg-white/15 disabled:opacity-50"
                   >
                     <Share2 className="h-4 w-4 text-[#25F4EE]" />
-                    <span>Bagikan / Simpan ke File HP</span>
+                    <span>Bagikan / Simpan ke Google Drive</span>
                   </button>
                 </div>
               </div>

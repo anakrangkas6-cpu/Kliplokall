@@ -1,6 +1,7 @@
 import type { AppSettings, FakeFriend, FolderConnection, UserProfile, VideoItem } from '../types';
 
 const BACKUP_MAGIC = 'KLIPBKP1';
+const STREAM_CHUNK_BYTES = 512 * 1024; // 512 KB per chunk for low-memory Android bridge
 
 interface BackupVideoEntry {
   meta: Omit<VideoItem, 'blob' | 'audioBlob'>;
@@ -37,34 +38,26 @@ export interface ParsedBackup {
   videos: VideoItem[];
 }
 
-export async function createBackupArchiveBlob(
-  payload: BackupPayload,
-  onProgress?: (current: number, total: number) => void
-): Promise<{ blob: Blob; fileName: string; totalBytes: number }> {
+export function buildBackupFileName(): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const datePart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}`;
+  return `KlipLokal-Cadangan-${datePart}_${timePart}.klipbackup`;
+}
+
+function buildManifestAndHeader(payload: BackupPayload) {
   const entries: BackupVideoEntry[] = [];
-  const binaryParts: BlobPart[] = [];
+  let mediaTotalBytes = 0;
 
-  for (let i = 0; i < payload.videos.length; i++) {
-    const v = payload.videos[i];
-    onProgress?.(i + 1, payload.videos.length);
+  for (const v of payload.videos) {
+    const blobSize = v.blob && v.blob.size > 0 ? v.blob.size : 0;
+    const blobType = (v.blob && v.blob.type) || v.mimeType || 'video/mp4';
+    const audioBlobSize = v.audioBlob && v.audioBlob.size > 0 ? v.audioBlob.size : 0;
+    const audioBlobType = (v.audioBlob && v.audioBlob.type) || 'audio/mpeg';
 
-    const { blob, audioBlob, ...meta } = v;
-    let blobSize = 0;
-    let blobType = v.mimeType || 'video/mp4';
-    if (blob && blob.size > 0) {
-      blobSize = blob.size;
-      blobType = blob.type || blobType;
-      binaryParts.push(blob);
-    }
-
-    let audioBlobSize = 0;
-    let audioBlobType = 'audio/mpeg';
-    if (audioBlob && audioBlob.size > 0) {
-      audioBlobSize = audioBlob.size;
-      audioBlobType = audioBlob.type || audioBlobType;
-      binaryParts.push(audioBlob);
-    }
-
+    mediaTotalBytes += blobSize + audioBlobSize;
+    const { blob: _b, audioBlob: _ab, ...meta } = v;
     entries.push({
       meta,
       blobSize,
@@ -90,17 +83,94 @@ export async function createBackupArchiveBlob(
 
   const header = new Uint8Array(12);
   header.set(magicBytes, 0);
-  const view = new DataView(header.buffer);
-  view.setUint32(8, manifestBytes.byteLength, true);
+  new DataView(header.buffer).setUint32(8, manifestBytes.byteLength, true);
+
+  return {
+    header,
+    manifestBytes,
+    totalBytes: header.byteLength + manifestBytes.byteLength + mediaTotalBytes,
+  };
+}
+
+export async function streamBackupToWriter(
+  payload: BackupPayload,
+  writeChunk: (chunk: Uint8Array) => Promise<void> | void,
+  onProgress?: (
+    bytesWritten: number,
+    totalBytes: number,
+    currentClip: number,
+    totalClips: number
+  ) => void
+): Promise<{ fileName: string; totalBytes: number }> {
+  const { header, manifestBytes, totalBytes } = buildManifestAndHeader(payload);
+  let bytesWritten = 0;
+
+  const pushBytes = async (bytes: Uint8Array, clipIdx: number) => {
+    for (let offset = 0; offset < bytes.byteLength; offset += STREAM_CHUNK_BYTES) {
+      const slice = bytes.subarray(offset, Math.min(offset + STREAM_CHUNK_BYTES, bytes.byteLength));
+      await writeChunk(slice);
+      bytesWritten += slice.byteLength;
+      onProgress?.(bytesWritten, totalBytes, clipIdx, payload.videos.length);
+    }
+  };
+
+  const pushBlob = async (blob: Blob, clipIdx: number) => {
+    for (let offset = 0; offset < blob.size; offset += STREAM_CHUNK_BYTES) {
+      const slice = blob.slice(offset, Math.min(offset + STREAM_CHUNK_BYTES, blob.size));
+      const buf = await slice.arrayBuffer();
+      const view = new Uint8Array(buf);
+      await writeChunk(view);
+      bytesWritten += view.byteLength;
+      onProgress?.(bytesWritten, totalBytes, clipIdx, payload.videos.length);
+    }
+  };
+
+  await pushBytes(header, 0);
+  await pushBytes(manifestBytes, 0);
+
+  for (let i = 0; i < payload.videos.length; i++) {
+    const v = payload.videos[i];
+    onProgress?.(bytesWritten, totalBytes, i + 1, payload.videos.length);
+    if (v.blob && v.blob.size > 0) {
+      await pushBlob(v.blob, i + 1);
+    }
+    if (v.audioBlob && v.audioBlob.size > 0) {
+      await pushBlob(v.audioBlob, i + 1);
+    }
+  }
+
+  return {
+    fileName: buildBackupFileName(),
+    totalBytes,
+  };
+}
+
+export async function createBackupArchiveBlob(
+  payload: BackupPayload,
+  onProgress?: (current: number, total: number) => void
+): Promise<{ blob: Blob; fileName: string; totalBytes: number }> {
+  const { header, manifestBytes } = buildManifestAndHeader(payload);
+  const binaryParts: BlobPart[] = [];
+
+  for (let i = 0; i < payload.videos.length; i++) {
+    const v = payload.videos[i];
+    onProgress?.(i + 1, payload.videos.length);
+
+    if (v.blob && v.blob.size > 0) {
+      binaryParts.push(v.blob);
+    }
+    if (v.audioBlob && v.audioBlob.size > 0) {
+      binaryParts.push(v.audioBlob);
+    }
+  }
 
   const archiveBlob = new Blob([header, manifestBytes, ...binaryParts], {
     type: 'application/octet-stream',
   });
 
-  const dateStr = new Date().toISOString().slice(0, 10);
   return {
     blob: archiveBlob,
-    fileName: `KlipLokal-Cadangan-${dateStr}.klipbackup`,
+    fileName: buildBackupFileName(),
     totalBytes: archiveBlob.size,
   };
 }
