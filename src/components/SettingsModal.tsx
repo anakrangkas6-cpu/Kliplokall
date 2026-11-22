@@ -10,16 +10,27 @@ import {
   Settings,
   Share2,
   ShieldCheck,
+  Trash2,
   Upload,
   UserCheck,
+  UserPlus,
   Users,
   X,
 } from 'lucide-react';
 import type { AppSettings, FakeFriend, FolderConnection, UserProfile, VideoItem } from '../types';
 import { createBackupArchiveBlob, parseBackupArchiveFile, type ParsedBackup } from '../utils/backup';
 import { formatFileSize, formatRelativeTime } from '../utils/format';
-import { PRESET_AVATARS } from '../utils/starterData';
+import { makeAvatarDataUrl, PRESET_AVATARS } from '../utils/starterData';
 import { readImageAsDataUrl } from '../utils/videoHelpers';
+
+const AVATAR_COLOR_PALETTES: Array<[string, string]> = [
+  ['#fe2c55', '#fb923c'],
+  ['#0ea5e9', '#6366f1'],
+  ['#10b981', '#0f766e'],
+  ['#a855f7', '#ec4899'],
+  ['#f59e0b', '#dc2626'],
+  ['#06b6d4', '#2563eb'],
+];
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -31,6 +42,8 @@ interface SettingsModalProps {
   onClose: () => void;
   onUpdateAppSettings: (next: AppSettings) => Promise<void>;
   onUpdateFakeFriend: (friend: FakeFriend) => Promise<void>;
+  onAddFakeFriend: (friend: FakeFriend) => Promise<void>;
+  onDeleteFakeFriend: (friendId: string) => Promise<void>;
   onUploadAsFriend: (friendId: string) => Promise<void>;
   onRestoreBackup: (parsed: ParsedBackup, mode: 'merge' | 'replace') => Promise<void>;
   onReseedFriendStarters: () => Promise<number>;
@@ -49,6 +62,8 @@ export function SettingsModal({
   onClose,
   onUpdateAppSettings,
   onUpdateFakeFriend,
+  onAddFakeFriend,
+  onDeleteFakeFriend,
   onUploadAsFriend,
   onRestoreBackup,
   onReseedFriendStarters,
@@ -56,6 +71,7 @@ export function SettingsModal({
 }: SettingsModalProps) {
   const backupInputRef = useRef<HTMLInputElement | null>(null);
   const friendAvatarInputRef = useRef<HTMLInputElement | null>(null);
+  const newFriendAvatarInputRef = useRef<HTMLInputElement | null>(null);
 
   const [activeTab, setActiveTab] = useState<SettingsTab>('playback');
 
@@ -71,14 +87,32 @@ export function SettingsModal({
     fileName: string;
   } | null>(null);
 
-  // Fake friends editing state
+  // Fake friends editing & creation state
   const [pendingAvatarFriendId, setPendingAvatarFriendId] = useState<string | null>(null);
   const [editingFriendId, setEditingFriendId] = useState<string | null>(null);
+  const [confirmDeleteFriendId, setConfirmDeleteFriendId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<{
     displayName: string;
     username: string;
     bio: string;
   }>({ displayName: '', username: '', bio: '' });
+
+  const [isAddingFriend, setIsAddingFriend] = useState(false);
+  const [newFriendDraft, setNewFriendDraft] = useState<{
+    displayName: string;
+    username: string;
+    usernameTouched: boolean;
+    bio: string;
+    avatarUrl: string | null;
+    colorIndex: number;
+  }>({
+    displayName: '',
+    username: '',
+    usernameTouched: false,
+    bio: '',
+    avatarUrl: null,
+    colorIndex: 0,
+  });
 
   if (!isOpen) return null;
 
@@ -254,6 +288,95 @@ export function SettingsModal({
     setStatusMsg(`Profil @${cleanUser} disimpan.`);
   };
 
+  const buildInitialsFromName = (name: string) => {
+    const parts = name.trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return 'TM';
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+  };
+
+  const formatSlugUsername = (text: string) =>
+    text
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '.')
+      .replace(/[^a-z0-9._]/g, '')
+      .replace(/\.{2,}/g, '.')
+      .replace(/^\.|\.$/g, '');
+
+  const newFriendPalette =
+    AVATAR_COLOR_PALETTES[newFriendDraft.colorIndex % AVATAR_COLOR_PALETTES.length];
+  const newFriendPreviewAvatar =
+    newFriendDraft.avatarUrl ||
+    makeAvatarDataUrl(
+      buildInitialsFromName(newFriendDraft.displayName),
+      newFriendPalette[0],
+      newFriendPalette[1]
+    );
+
+  const handleNewFriendPhotoPicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const dataUrl = await readImageAsDataUrl(file, 360);
+      setNewFriendDraft((prev) => ({ ...prev, avatarUrl: dataUrl }));
+    } catch {
+      setErrorMsg('Gagal membaca foto profil dari perangkat.');
+    }
+  };
+
+  const handleCreateNewFriend = async (openUploadImmediately: boolean) => {
+    setErrorMsg(null);
+    setStatusMsg(null);
+
+    const cleanName = newFriendDraft.displayName.trim();
+    if (!cleanName) {
+      setErrorMsg('Nama tampilan teman baru wajib diisi.');
+      return;
+    }
+
+    let baseUsername = formatSlugUsername(newFriendDraft.username || cleanName);
+    if (!baseUsername) {
+      baseUsername = `teman.${fakeFriends.length + 1}`;
+    }
+
+    const existingUsernames = new Set(fakeFriends.map((f) => f.username.toLowerCase()));
+    let finalUsername = baseUsername;
+    let suffix = 2;
+    while (existingUsernames.has(finalUsername.toLowerCase())) {
+      finalUsername = `${baseUsername}${suffix}`;
+      suffix++;
+    }
+
+    const created: FakeFriend = {
+      id: `friend-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      displayName: cleanName,
+      username: finalUsername,
+      bio: newFriendDraft.bio.trim() || 'Berbagi klip harian & momen seru di KlipLokal.',
+      avatarUrl: newFriendPreviewAvatar,
+      followersCount: 1200 + Math.floor(Math.random() * 14000),
+      followingCount: 60 + Math.floor(Math.random() * 180),
+    };
+
+    await onAddFakeFriend(created);
+    setNewFriendDraft({
+      displayName: '',
+      username: '',
+      usernameTouched: false,
+      bio: '',
+      avatarUrl: null,
+      colorIndex: (newFriendDraft.colorIndex + 1) % AVATAR_COLOR_PALETTES.length,
+    });
+    setIsAddingFriend(false);
+
+    if (openUploadImmediately) {
+      await onUploadAsFriend(created.id);
+    } else {
+      setStatusMsg(`Teman baru "${created.displayName}" (@${created.username}) berhasil ditambahkan.`);
+    }
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-0 sm:p-4 backdrop-blur-sm"
@@ -314,14 +437,14 @@ export function SettingsModal({
           <button
             type="button"
             onClick={() => setActiveTab('friends')}
-            className={`flex shrink-0 items-center gap-2 border-b-2 px-3.5 py-2.5 text-xs font-bold transition-colors ${
+            className={`flex shrink-0 items-center gap-2 border-b-2 px-3.5 py-2.5 text-xs font-bold whitespace-nowrap transition-colors ${
               activeTab === 'friends'
                 ? 'border-white text-white'
                 : 'border-transparent text-zinc-400 hover:text-white'
             }`}
           >
             <Users className="h-3.5 w-3.5" />
-            <span>10 Teman Rekayasa</span>
+            <span>Teman Rekayasa ({fakeFriends.length})</span>
           </button>
         </div>
 
@@ -429,8 +552,9 @@ export function SettingsModal({
                       Cadangkan Sebelum Hapus atau Update Aplikasi
                     </h3>
                     <p className="text-xs leading-relaxed text-zinc-400">
-                      Ekspor semua video, foto, musik, folder pribadi, komentar, serta 10 profil
-                      teman ke satu file <span className="font-mono-tabular">.klipbackup</span>.
+                      Ekspor semua video, foto, musik, folder pribadi, komentar, serta{' '}
+                      {fakeFriends.length} profil teman ke satu file{' '}
+                      <span className="font-mono-tabular">.klipbackup</span>.
                       Simpan file ini di penyimpanan HP / Google Drive agar bisa dipulihkan kapan
                       saja setelah install ulang atau update APK.
                     </p>
@@ -553,35 +677,46 @@ export function SettingsModal({
             </div>
           )}
 
-          {/* TAB 3: 10 FAKE FRIENDS + IMPERSONATION + CUSTOM AVATARS */}
+          {/* TAB 3: FAKE FRIENDS + ADD NEW + IMPERSONATION + CUSTOM AVATARS */}
           {activeTab === 'friends' && (
             <div className="space-y-4">
               <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2.5">
                   <div>
                     <h3 className="text-sm font-bold text-white">
-                      Mode Teman Rekayasa & Foto Profil
+                      Kelola Teman Rekayasa ({fakeFriends.length} Akun)
                     </h3>
                     <p className="text-xs text-zinc-400">
-                      Pilih salah satu teman di bawah untuk mengunggah video/foto atau berkomentar
-                      seolah-olah dia yang memposting. Semua pengaturan ini tersembunyi di sini.
+                      Tambah teman baru, ubah foto profil, atau pakai akun teman untuk mengunggah
+                      video, foto, dan komentar. Semua pengaturan ini tersembunyi di sini.
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setErrorMsg(null);
+                        setIsAddingFriend((prev) => !prev);
+                      }}
+                      className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-[#FE2C55] px-3.5 text-xs font-bold text-white whitespace-nowrap transition-colors hover:bg-[#e52349]"
+                    >
+                      <UserPlus className="h-4 w-4" />
+                      <span>{isAddingFriend ? 'Tutup Form' : 'Tambah Teman'}</span>
+                    </button>
                     <button
                       type="button"
                       onClick={async () => {
                         const updatedCount = await onReassignFolderCreators();
                         setStatusMsg(
                           updatedCount > 0
-                            ? `${updatedCount} video folder otomatis diberi nama & foto profil 10 teman.`
+                            ? `${updatedCount} video folder otomatis diberi nama & foto profil ${fakeFriends.length} teman.`
                             : 'Belum ada video di folder untuk dibagikan.'
                         );
                       }}
-                      className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-white/10 px-3 text-xs font-semibold text-white hover:bg-white/20"
+                      className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-white/10 px-3 text-xs font-semibold text-white whitespace-nowrap hover:bg-white/20"
                     >
                       <Users className="h-3.5 w-3.5 text-[#FE2C55]" />
-                      <span>Bagikan Nama ke Video Folder</span>
+                      <span>Bagikan ke Video Folder</span>
                     </button>
                     <button
                       type="button"
@@ -589,27 +724,205 @@ export function SettingsModal({
                         const added = await onReseedFriendStarters();
                         setStatusMsg(
                           added > 0
-                            ? `${added} klip contoh teman rekayasa berhasil ditambahkan ke feed.`
-                            : 'Semua 10 teman sudah memiliki klip di feed.'
+                            ? `${added} klip contoh teman berhasil ditambahkan ke feed.`
+                            : 'Semua klip contoh awal sudah ada di feed.'
                         );
                       }}
-                      className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-white/10 px-3 text-xs font-semibold text-[#25F4EE] hover:bg-white/20"
+                      className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-white/10 px-3 text-xs font-semibold text-[#25F4EE] whitespace-nowrap hover:bg-white/20"
                     >
                       <RefreshCw className="h-3.5 w-3.5" />
-                      <span>Lengkapi Klip 10 Teman</span>
+                      <span>Lengkapi Klip Contoh</span>
                     </button>
                   </div>
                 </div>
 
-                {/* Toggle auto-assign folder videos to 10 fake friends */}
+                {/* Add New Friend Form */}
+                {isAddingFriend && (
+                  <div className="rounded-xl border border-[#FE2C55]/40 bg-black/50 p-4 space-y-3.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <h4 className="text-xs font-bold text-white">Tambah Teman Baru</h4>
+                      <button
+                        type="button"
+                        onClick={() => setIsAddingFriend(false)}
+                        className="text-xs font-semibold text-zinc-400 hover:text-white"
+                      >
+                        Batal
+                      </button>
+                    </div>
+
+                    <input
+                      ref={newFriendAvatarInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={handleNewFriendPhotoPicked}
+                      className="hidden"
+                    />
+
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                      <div className="flex items-center gap-3">
+                        <div className="relative shrink-0">
+                          <img
+                            src={newFriendPreviewAvatar}
+                            alt="Preview avatar teman baru"
+                            referrerPolicy="no-referrer"
+                            className="h-14 w-14 rounded-full border border-white/20 object-cover bg-zinc-800"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => newFriendAvatarInputRef.current?.click()}
+                            aria-label="Pilih foto teman baru"
+                            className="absolute -right-1 -bottom-1 flex h-7 w-7 items-center justify-center rounded-full border border-black bg-white text-black shadow hover:bg-[#25F4EE]"
+                          >
+                            <Camera className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => newFriendAvatarInputRef.current?.click()}
+                              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-white/10 px-2.5 text-[11px] font-semibold text-white hover:bg-white/20"
+                            >
+                              <Camera className="h-3.5 w-3.5" />
+                              <span>Foto Galeri</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setNewFriendDraft((prev) => ({
+                                  ...prev,
+                                  avatarUrl: null,
+                                  colorIndex: (prev.colorIndex + 1) % AVATAR_COLOR_PALETTES.length,
+                                }))
+                              }
+                              className="inline-flex h-8 items-center rounded-lg bg-white/10 px-2.5 text-[11px] font-semibold text-zinc-300 hover:bg-white/20 hover:text-white"
+                            >
+                              Ganti Warna Inisial
+                            </button>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            {PRESET_AVATARS.map((preset) => (
+                              <button
+                                key={preset.id}
+                                type="button"
+                                onClick={() =>
+                                  setNewFriendDraft((prev) => ({ ...prev, avatarUrl: preset.url }))
+                                }
+                                title={`Avatar ${preset.label}`}
+                                className={`h-7 w-7 overflow-hidden rounded-full border transition-colors ${
+                                  newFriendDraft.avatarUrl === preset.url
+                                    ? 'border-[#25F4EE]'
+                                    : 'border-white/20 hover:border-white/50'
+                                }`}
+                              >
+                                <img
+                                  src={preset.url}
+                                  alt={preset.label}
+                                  referrerPolicy="no-referrer"
+                                  className="h-full w-full object-cover"
+                                />
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-2.5 sm:grid-cols-2">
+                      <label className="block">
+                        <span className="mb-1 block text-[11px] font-semibold text-zinc-300">
+                          Nama Tampilan
+                        </span>
+                        <input
+                          type="text"
+                          value={newFriendDraft.displayName}
+                          placeholder="Contoh: Budi Santoso"
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setNewFriendDraft((prev) => ({
+                              ...prev,
+                              displayName: val,
+                              username: prev.usernameTouched
+                                ? prev.username
+                                : formatSlugUsername(val),
+                            }));
+                          }}
+                          className="h-10 w-full rounded-lg border border-white/15 bg-black/60 px-3 text-xs text-white placeholder:text-zinc-500 focus:border-[#25F4EE] focus:outline-none"
+                        />
+                      </label>
+
+                      <label className="block">
+                        <span className="mb-1 block text-[11px] font-semibold text-zinc-300">
+                          Username
+                        </span>
+                        <div className="flex h-10 items-center rounded-lg border border-white/15 bg-black/60 px-3 focus-within:border-[#25F4EE]">
+                          <span className="text-xs font-semibold text-zinc-500 mr-1">@</span>
+                          <input
+                            type="text"
+                            value={newFriendDraft.username}
+                            placeholder="budi.santoso"
+                            onChange={(e) =>
+                              setNewFriendDraft((prev) => ({
+                                ...prev,
+                                username: e.target.value
+                                  .toLowerCase()
+                                  .replace(/[^a-z0-9._]/g, ''),
+                                usernameTouched: true,
+                              }))
+                            }
+                            className="h-full w-full bg-transparent text-xs text-white placeholder:text-zinc-500 focus:outline-none"
+                          />
+                        </div>
+                      </label>
+                    </div>
+
+                    <label className="block">
+                      <span className="mb-1 block text-[11px] font-semibold text-zinc-300">
+                        Bio Singkat (Opsional)
+                      </span>
+                      <input
+                        type="text"
+                        value={newFriendDraft.bio}
+                        placeholder="Berbagi klip harian & momen seru di KlipLokal."
+                        onChange={(e) =>
+                          setNewFriendDraft((prev) => ({ ...prev, bio: e.target.value }))
+                        }
+                        className="h-10 w-full rounded-lg border border-white/15 bg-black/60 px-3 text-xs text-white placeholder:text-zinc-500 focus:border-[#25F4EE] focus:outline-none"
+                      />
+                    </label>
+
+                    <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => handleCreateNewFriend(false)}
+                        className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-white/15 px-4 text-xs font-bold text-white whitespace-nowrap hover:bg-white/25"
+                      >
+                        <UserPlus className="h-3.5 w-3.5" />
+                        <span>Simpan Teman</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleCreateNewFriend(true)}
+                        className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-[#25F4EE] px-4 text-xs font-bold text-black whitespace-nowrap hover:bg-[#1de0da]"
+                      >
+                        <Upload className="h-3.5 w-3.5" />
+                        <span>Simpan & Upload Video</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Toggle auto-assign folder videos to fake friends */}
                 <div className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/30 px-3.5 py-2.5">
                   <div className="min-w-0">
                     <div className="text-xs font-bold text-white">
-                      Otomatis pakai nama 10 teman untuk video Folder
+                      Otomatis pakai nama teman untuk video Folder
                     </div>
                     <div className="text-[11px] text-zinc-400">
-                      Video yang masuk ke folder otomatis bergantian memakai nama & foto profil 10
-                      teman (atau mengikuti nama folder jika sama dengan nama teman).
+                      Video yang masuk ke folder otomatis bergantian memakai nama & foto profil{' '}
+                      {fakeFriends.length} teman (atau mengikuti nama folder jika sama dengan nama
+                      teman).
                     </div>
                   </div>
                   <button
@@ -752,10 +1065,44 @@ export function SettingsModal({
                           >
                             <Pencil className="h-4 w-4" />
                           </button>
+                          {fakeFriends.length > 1 && (
+                            confirmDeleteFriendId === friend.id ? (
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    await onDeleteFakeFriend(friend.id);
+                                    setConfirmDeleteFriendId(null);
+                                    setStatusMsg(`Akun "${friend.displayName}" dihapus dari daftar teman.`);
+                                  }}
+                                  className="h-9 rounded-xl bg-rose-600 px-2.5 text-xs font-bold text-white hover:bg-rose-500"
+                                >
+                                  Hapus
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteFriendId(null)}
+                                  className="h-9 rounded-xl bg-white/10 px-2.5 text-xs font-semibold text-zinc-300 hover:bg-white/20"
+                                >
+                                  Batal
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteFriendId(friend.id)}
+                                aria-label={`Hapus teman ${friend.displayName}`}
+                                title="Hapus teman dari daftar"
+                                className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/10 text-zinc-400 hover:bg-rose-600/20 hover:text-rose-400"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            )
+                          )}
                           <button
                             type="button"
                             onClick={() => onUploadAsFriend(friend.id)}
-                            className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-[#25F4EE]/15 px-3 text-xs font-bold text-[#25F4EE] transition-colors hover:bg-[#25F4EE]/25"
+                            className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-[#25F4EE]/15 px-3 text-xs font-bold text-[#25F4EE] whitespace-nowrap transition-colors hover:bg-[#25F4EE]/25"
                           >
                             <Upload className="h-3.5 w-3.5" />
                             <span>Upload Video</span>
@@ -768,7 +1115,7 @@ export function SettingsModal({
                                 activeIdentityFriendId: isCurrentActor ? null : friend.id,
                               })
                             }
-                            className={`inline-flex h-9 items-center gap-1.5 rounded-xl px-3 text-xs font-bold transition-colors ${
+                            className={`inline-flex h-9 items-center gap-1.5 rounded-xl px-3 text-xs font-bold whitespace-nowrap transition-colors ${
                               isCurrentActor
                                 ? 'bg-[#FE2C55] text-white'
                                 : 'bg-white/10 text-white hover:bg-white/20'

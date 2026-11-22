@@ -627,6 +627,26 @@ export default function App() {
     }
   };
 
+  const handleAddFakeFriend = async (newFriend: FakeFriend) => {
+    const nextFriends = [newFriend, ...fakeFriends];
+    setFakeFriends(nextFriends);
+    await saveFakeFriends(nextFriends);
+  };
+
+  const handleDeleteFakeFriend = async (friendId: string) => {
+    if (fakeFriends.length <= 1) return;
+    const nextFriends = fakeFriends.filter((f) => f.id !== friendId);
+    setFakeFriends(nextFriends);
+    await saveFakeFriends(nextFriends);
+
+    if (appSettings.activeIdentityFriendId === friendId) {
+      await handleUpdateAppSettings({
+        ...appSettings,
+        activeIdentityFriendId: null,
+      });
+    }
+  };
+
   const handleReseedFriendStarters = async (): Promise<number> => {
     const starters = createStarterVideos(fakeFriends);
     const existingIds = new Set(videos.map((v) => v.id));
@@ -1666,6 +1686,8 @@ export default function App() {
         onClose={() => setIsSettingsOpen(false)}
         onUpdateAppSettings={handleUpdateAppSettings}
         onUpdateFakeFriend={handleUpdateFakeFriend}
+        onAddFakeFriend={handleAddFakeFriend}
+        onDeleteFakeFriend={handleDeleteFakeFriend}
         onUploadAsFriend={async (friendId) => {
           await handleUpdateAppSettings({
             ...appSettings,
